@@ -45,6 +45,7 @@ const DEFAULT_CONFIG = {
 const fmt = (n) => Number(n).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' });
 const uid = () => Math.random().toString(36).slice(2, 10);
 const onlyDigits = (s) => (s || '').replace(/\D/g, '');
+const DELIVERY_FEE = 10;
 
 const rowToConfig = (row) => ({
   adminPassword: row.admin_password || DEFAULT_CONFIG.adminPassword,
@@ -191,7 +192,8 @@ export default function App() {
   const cartCount = cart.reduce((s, i) => s + i.qty, 0);
 
   const finalizeOrder = async (form) => {
-    const order = { id: uid().toUpperCase(), items: cart, total: cartTotal, customer: form, status: 'Novo', date: new Date().toISOString() };
+    const total = cartTotal + (form.deliveryFee || 0);
+    const order = { id: uid().toUpperCase(), items: cart, total, customer: form, status: 'Novo', date: new Date().toISOString() };
     try {
       const { error } = await supabase.from('pedidos').insert(order);
       if (error) throw error;
@@ -446,7 +448,10 @@ function Shop({ products, category, setCategory, addToCart, cart, cartOpen, setC
 
 function buildWhatsAppMessage(order) {
   const items = order.items.map((i) => `${i.qty}x ${i.name} (${fmt(i.price * i.qty)})`).join('\n');
-  return `Olá! Fiz o pedido #${order.id} na Charme de Mulher:\n${items}\nTotal: ${fmt(order.total)}\nForma de pagamento: ${order.customer.payment}\nNome: ${order.customer.name}\nEndereço: ${order.customer.address}`;
+  const entregaLinha = order.customer.deliveryMethod === 'retirada'
+    ? 'Retirada no local'
+    : `Entrega — Endereço: ${order.customer.address} (taxa de entrega: ${fmt(order.customer.deliveryFee || 0)})`;
+  return `Olá! Fiz o pedido #${order.id} na Charme de Mulher:\n${items}\nTotal: ${fmt(order.total)}\nForma de pagamento: ${order.customer.payment}\nNome: ${order.customer.name}\n${entregaLinha}`;
 }
 
 function MyOrdersModal({ orders, onClose }) {
@@ -480,25 +485,41 @@ function CheckoutForm({ cartTotal, onSubmit }) {
   const [name, setName] = useState('');
   const [phone, setPhone] = useState('');
   const [address, setAddress] = useState('');
+  const [deliveryMethod, setDeliveryMethod] = useState('entrega');
   const [payment, setPayment] = useState('Pix');
   const [err, setErr] = useState('');
+  const deliveryFee = deliveryMethod === 'entrega' ? DELIVERY_FEE : 0;
+  const finalTotal = cartTotal + deliveryFee;
   const submit = () => {
-    if (!name.trim() || !phone.trim() || !address.trim()) { setErr('Preencha nome, telefone e endereço para continuar.'); return; }
-    onSubmit({ name, phone, address, payment });
+    if (!name.trim() || !phone.trim()) { setErr('Preencha nome e telefone para continuar.'); return; }
+    if (deliveryMethod === 'entrega' && !address.trim()) { setErr('Preencha o endereço de entrega.'); return; }
+    onSubmit({ name, phone, address: deliveryMethod === 'entrega' ? address : '', deliveryMethod, deliveryFee, payment });
   };
   return (
     <div className="checkout">
       <h2>Finalizar pedido</h2>
       <label>Nome completo<input value={name} onChange={(e) => setName(e.target.value)} placeholder="Seu nome" /></label>
       <label>WhatsApp<input value={phone} onChange={(e) => setPhone(e.target.value)} placeholder="(99) 99999-9999" /></label>
-      <label>Endereço de entrega<input value={address} onChange={(e) => setAddress(e.target.value)} placeholder="Rua, número, bairro, cidade" /></label>
+      <label>Como deseja receber?
+        <select value={deliveryMethod} onChange={(e) => setDeliveryMethod(e.target.value)}>
+          <option value="entrega">Entrega (+ {fmt(DELIVERY_FEE)})</option>
+          <option value="retirada">Retirada no local</option>
+        </select>
+      </label>
+      {deliveryMethod === 'entrega' && (
+        <label>Endereço de entrega<input value={address} onChange={(e) => setAddress(e.target.value)} placeholder="Rua, número, bairro, cidade" /></label>
+      )}
       <label>Forma de pagamento
         <select value={payment} onChange={(e) => setPayment(e.target.value)}>
           <option>Pix</option><option>Cartão</option>
         </select>
       </label>
       {err && <p className="form-err">{err}</p>}
-      <div className="checkout-total"><span>Total</span><span>{fmt(cartTotal)}</span></div>
+      <div className="checkout-total"><span>Subtotal</span><span>{fmt(cartTotal)}</span></div>
+      {deliveryMethod === 'entrega' && (
+        <div className="checkout-total"><span>Taxa de entrega</span><span>{fmt(deliveryFee)}</span></div>
+      )}
+      <div className="checkout-total"><span>Total</span><span>{fmt(finalTotal)}</span></div>
       <button className="hero-cta full" onClick={submit}>Confirmar pedido</button>
     </div>
   );
@@ -562,7 +583,14 @@ function Admin({ products, orders, config, adminTab, setAdminTab, saveProduct, d
               </summary>
               <div className="order-detail">
                 <p><strong>WhatsApp:</strong> {o.customer.phone}</p>
-                <p><strong>Endereço:</strong> {o.customer.address}</p>
+                {o.customer.deliveryMethod === 'retirada' ? (
+                  <p><strong>Recebimento:</strong> Retirada no local</p>
+                ) : (
+                  <>
+                    <p><strong>Recebimento:</strong> Entrega (taxa: {fmt(o.customer.deliveryFee || 0)})</p>
+                    <p><strong>Endereço:</strong> {o.customer.address}</p>
+                  </>
+                )}
                 <p><strong>Pagamento:</strong> {o.customer.payment}</p>
                 <ul>{o.items.map((i) => <li key={i.id}>{i.qty}x {i.name} — {fmt(i.price * i.qty)}</li>)}</ul>
               </div>
