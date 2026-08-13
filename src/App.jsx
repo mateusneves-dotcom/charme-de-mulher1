@@ -172,7 +172,8 @@ export default function App() {
       const { error } = await supabase.from('config').update(configToRow(next)).eq('id', 1);
       if (error) throw error;
       setConfig(next);
-    } catch (e) { console.error(e); setStorageError(true); }
+      return true;
+    } catch (e) { console.error(e); setStorageError(true); return false; }
   };
 
   /* --------- carrinho --------- */
@@ -666,9 +667,13 @@ function SettingsForm({ config, onSave }) {
   const [passMsg, setPassMsg] = useState('');
 
   const saveGeneral = async () => {
-    await onSave({ ...config, whatsappNumber: onlyDigits(whatsapp), pixKey: pix, cardPaymentLink: cardLink, sobreTexto: about });
-    setSavedMsg('Configurações salvas.');
-    setTimeout(() => setSavedMsg(''), 2500);
+    const ok = await onSave({ ...config, whatsappNumber: onlyDigits(whatsapp), pixKey: pix, cardPaymentLink: cardLink, sobreTexto: about });
+    if (ok) {
+      setSavedMsg('Configurações salvas.');
+    } else {
+      setSavedMsg('Erro ao salvar — verifique a conexão com o banco de dados.');
+    }
+    setTimeout(() => setSavedMsg(''), 3500);
   };
 
   const changePassword = async () => {
