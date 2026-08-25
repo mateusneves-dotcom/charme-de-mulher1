@@ -40,6 +40,8 @@ const DEFAULT_CONFIG = {
   pixKey: '',
   cardPaymentLink: '',
   sobreTexto: 'Criada por Laiana e Taiana, a Charme de Mulher nasceu para oferecer semijoias delicadas que valorizam o brilho do dia a dia. Cada peça é escolhida com carinho para durar e combinar com você.',
+  promoBarText: 'Frete grátis para compras acima de R$ 150',
+  heroImage: '',
 };
 
 const fmt = (n) => Number(n).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' });
@@ -53,6 +55,8 @@ const rowToConfig = (row) => ({
   pixKey: row.pix_key || '',
   cardPaymentLink: row.card_payment_link || '',
   sobreTexto: row.sobre_texto || DEFAULT_CONFIG.sobreTexto,
+  promoBarText: row.promo_bar_text ?? DEFAULT_CONFIG.promoBarText,
+  heroImage: row.hero_image || '',
 });
 const configToRow = (cfg) => ({
   admin_password: cfg.adminPassword,
@@ -60,7 +64,15 @@ const configToRow = (cfg) => ({
   pix_key: cfg.pixKey,
   card_payment_link: cfg.cardPaymentLink,
   sobre_texto: cfg.sobreTexto,
+  promo_bar_text: cfg.promoBarText,
+  hero_image: cfg.heroImage,
 });
+
+const rowToProduct = (row) => ({ ...row, originalPrice: row.original_price ?? null });
+const productToRow = (p) => {
+  const { originalPrice, ...rest } = p;
+  return { ...rest, original_price: originalPrice ? Number(originalPrice) : null };
+};
 
 function resizeImage(file, maxDim = 640, quality = 0.82) {
   return new Promise((resolve, reject) => {
@@ -117,7 +129,7 @@ export default function App() {
         if (prodRes.error) throw prodRes.error;
         if (orderRes.error) throw orderRes.error;
         if (configRes.error) throw configRes.error;
-        setProducts(prodRes.data || []);
+        setProducts((prodRes.data || []).map(rowToProduct));
         setOrders(orderRes.data || []);
         setConfig(configRes.data ? rowToConfig(configRes.data) : DEFAULT_CONFIG);
       } catch (e) {
@@ -132,9 +144,9 @@ export default function App() {
   /* --------- funções de leitura/escrita --------- */
   const saveProduct = async (form) => {
     const isNew = !form.id;
-    const clean = { ...form, id: isNew ? uid() : form.id, price: parseFloat(form.price) || 0, stock: parseInt(form.stock) || 0 };
+    const clean = { ...form, id: isNew ? uid() : form.id, price: parseFloat(form.price) || 0, stock: parseInt(form.stock) || 0, originalPrice: form.originalPrice ? parseFloat(form.originalPrice) || null : null };
     try {
-      const { error } = await supabase.from('produtos').upsert(clean);
+      const { error } = await supabase.from('produtos').upsert(productToRow(clean));
       if (error) throw error;
       setProducts((prev) => isNew ? [...prev, clean] : prev.map((p) => p.id === clean.id ? clean : p));
       setEditingProduct(null);
@@ -193,7 +205,22 @@ export default function App() {
 
   const finalizeOrder = async (form) => {
     const total = cartTotal + (form.deliveryFee || 0);
-    const order = { id: uid().toUpperCase(), items: cart, total, customer: form, status: 'Novo', date: new Date().toISOString() };
+    let paymentLink = null;
+    let reservedId = null;
+    if (form.payment === 'Cartão') {
+      try {
+        reservedId = uid().toUpperCase();
+        const { data, error: fnError } = await supabase.functions.invoke('create-payment-link', {
+          body: { orderId: reservedId, total },
+        });
+        if (fnError || !data?.paymentLink) throw fnError || new Error('Link não retornado');
+        paymentLink = data.paymentLink;
+      } catch (e) {
+        console.error('Falha ao gerar link de pagamento automático:', e);
+        reservedId = null;
+      }
+    }
+    const order = { id: reservedId || uid().toUpperCase(), items: cart, total, customer: { ...form, paymentLink }, status: 'Novo', date: new Date().toISOString() };
     try {
       const { error } = await supabase.from('pedidos').insert(order);
       if (error) throw error;
@@ -257,6 +284,55 @@ export default function App() {
 }
 
 /* ==================================================================== LOJA */
+function ProductCard({ p, onOpen, onAdd }) {
+  const meta = CATEGORY_META[p.category] || CATEGORY_META.pulseiras;
+  const hasDiscount = p.originalPrice && p.originalPrice > p.price;
+  const discountPct = hasDiscount ? Math.round((1 - p.price / p.originalPrice) * 100) : 0;
+  return (
+    <article className="card" onClick={() => onOpen(p)}>
+      <div className="card-visual">
+        {p.image ? <img src={p.image} alt={p.name} /> : meta.icon({ className: 'card-icon' })}
+        {p.stock === 0 && <span className="badge-out">Esgotado</span>}
+        {hasDiscount && p.stock > 0 && <span className="badge-discount">-{discountPct}%</span>}
+      </div>
+      <div className="card-body">
+        <span className="card-cat">{meta.label}</span>
+        <h3 className="card-name">{p.name}</h3>
+        <div className="card-row">
+          <div className="card-price-wrap">
+            {hasDiscount && <span className="card-price-old">{fmt(p.originalPrice)}</span>}
+            <span className="card-price">{fmt(p.price)}</span>
+          </div>
+          <button className="card-add" disabled={p.stock === 0} onClick={(e) => { e.stopPropagation(); onAdd(p, 1); }}>
+            {p.stock === 0 ? 'Indisponível' : 'Adicionar'}
+          </button>
+        </div>
+      </div>
+    </article>
+  );
+}
+
+function CategoryCarousel({ catKey, products, onOpen, onAdd, onVerMais }) {
+  const items = products.filter((p) => p.category === catKey);
+  if (items.length === 0) return null;
+  const meta = CATEGORY_META[catKey];
+  return (
+    <section className="carousel-section">
+      <div className="carousel-head">
+        <h2>{meta.label}</h2>
+      </div>
+      <div className="carousel-track">
+        {items.map((p) => (
+          <div className="carousel-item" key={p.id}>
+            <ProductCard p={p} onOpen={onOpen} onAdd={onAdd} />
+          </div>
+        ))}
+      </div>
+      <button className="ver-mais-btn" onClick={() => onVerMais(catKey)}>Ver mais</button>
+    </section>
+  );
+}
+
 function Shop({ products, category, setCategory, addToCart, cart, cartOpen, setCartOpen,
   updateQty, removeFromCart, cartTotal, cartCount, detailProduct, setDetailProduct,
   checkoutOpen, setCheckoutOpen, finalizeOrder, confirmedOrder, setConfirmedOrder,
@@ -267,6 +343,8 @@ function Shop({ products, category, setCategory, addToCart, cart, cartOpen, setC
   return (
     <div className="shop">
       {storageError && <div className="banner-warn">Não foi possível conectar ao banco de dados agora — suas alterações podem não salvar.</div>}
+
+      {config.promoBarText && <div className="promo-bar">{config.promoBarText}</div>}
 
       <header className="header">
         <div className="brand">
@@ -285,18 +363,38 @@ function Shop({ products, category, setCategory, addToCart, cart, cartOpen, setC
         </div>
       </header>
 
-      <section className="hero" ref={heroRef}>
-        <div className="hero-ring" />
-        <div className="hero-ring hero-ring-2" />
-        <p className="hero-eyebrow">Coleção atual</p>
-        <h1 className="hero-title">Semijoias que<br />transformam<br />qualquer look</h1>
-        <p className="hero-sub">Peças folheadas a ouro, pensadas para durar e brilhar no seu dia a dia.</p>
-        <a href="#colecao" className="hero-cta">Ver coleção</a>
-      </section>
+      {config.heroImage ? (
+        <section className="hero hero-image-mode" ref={heroRef}>
+          <img className="hero-bg" src={config.heroImage} alt="" />
+          <div className="hero-scrim" />
+          <div className="hero-image-content">
+            <p className="hero-eyebrow">Coleção atual</p>
+            <h1 className="hero-title">Semijoias que<br />transformam<br />qualquer look</h1>
+            <p className="hero-sub">Peças folheadas a ouro, pensadas para durar e brilhar no seu dia a dia.</p>
+            <a href="#colecao" className="hero-cta">Ver coleção</a>
+          </div>
+        </section>
+      ) : (
+        <section className="hero" ref={heroRef}>
+          <div className="hero-ring" />
+          <div className="hero-ring hero-ring-2" />
+          <p className="hero-eyebrow">Coleção atual</p>
+          <h1 className="hero-title">Semijoias que<br />transformam<br />qualquer look</h1>
+          <p className="hero-sub">Peças folheadas a ouro, pensadas para durar e brilhar no seu dia a dia.</p>
+          <a href="#colecao" className="hero-cta">Ver coleção</a>
+        </section>
+      )}
 
       <section className="about">
         <p>{config.sobreTexto}</p>
       </section>
+
+      {CAT_KEYS.map((k) => (
+        <CategoryCarousel
+          key={k} catKey={k} products={products} onOpen={setDetailProduct} onAdd={addToCart}
+          onVerMais={(catKey) => { setCategory(catKey); document.getElementById('colecao')?.scrollIntoView({ behavior: 'smooth' }); }}
+        />
+      ))}
 
       <nav className="filters" id="colecao">
         {[{ key: 'todas', label: 'Todas' }, ...CAT_KEYS.map((k) => ({ key: k, label: CATEGORY_META[k].label }))].map((c) => (
@@ -305,27 +403,9 @@ function Shop({ products, category, setCategory, addToCart, cart, cartOpen, setC
       </nav>
 
       <section className="grid">
-        {products.map((p) => {
-          const meta = CATEGORY_META[p.category] || CATEGORY_META.pulseiras;
-          return (
-            <article key={p.id} className="card" onClick={() => setDetailProduct(p)}>
-              <div className="card-visual">
-                {p.image ? <img src={p.image} alt={p.name} /> : meta.icon({ className: 'card-icon' })}
-                {p.stock === 0 && <span className="badge-out">Esgotado</span>}
-              </div>
-              <div className="card-body">
-                <span className="card-cat">{meta.label}</span>
-                <h3 className="card-name">{p.name}</h3>
-                <div className="card-row">
-                  <span className="card-price">{fmt(p.price)}</span>
-                  <button className="card-add" disabled={p.stock === 0} onClick={(e) => { e.stopPropagation(); addToCart(p, 1); }}>
-                    {p.stock === 0 ? 'Indisponível' : 'Adicionar'}
-                  </button>
-                </div>
-              </div>
-            </article>
-          );
-        })}
+        {products.map((p) => (
+          <ProductCard key={p.id} p={p} onOpen={setDetailProduct} onAdd={addToCart} />
+        ))}
         {products.length === 0 && <p className="empty">Nenhuma peça nesta categoria no momento.</p>}
       </section>
 
@@ -347,7 +427,12 @@ function Shop({ products, category, setCategory, addToCart, cart, cartOpen, setC
             <h2 className="detail-name">{detailProduct.name}</h2>
             <p className="detail-desc">{detailProduct.description}</p>
             <div className="detail-row">
-              <span className="card-price big">{fmt(detailProduct.price)}</span>
+              <div className="card-price-wrap">
+                {detailProduct.originalPrice && detailProduct.originalPrice > detailProduct.price && (
+                  <span className="card-price-old big">{fmt(detailProduct.originalPrice)}</span>
+                )}
+                <span className="card-price big">{fmt(detailProduct.price)}</span>
+              </div>
               <span className="detail-stock">{detailProduct.stock > 0 ? `${detailProduct.stock} em estoque` : 'Esgotado'}</span>
             </div>
             <button className="hero-cta full" disabled={detailProduct.stock === 0} onClick={() => { addToCart(detailProduct, 1); setDetailProduct(null); }}>Adicionar ao carrinho</button>
@@ -408,14 +493,14 @@ function Shop({ products, category, setCategory, addToCart, cart, cartOpen, setC
               </div>
             )}
 
-            {confirmedOrder.customer.payment === 'Cartão' && config.cardPaymentLink && (
+            {confirmedOrder.customer.payment === 'Cartão' && (confirmedOrder.customer.paymentLink || config.cardPaymentLink) && (
               <div className="pix-box">
                 <span className="pix-label">Pagamento com cartão</span>
                 <a
                   className="hero-cta full"
                   style={{ marginTop: 8 }}
                   target="_blank" rel="noopener noreferrer"
-                  href={config.cardPaymentLink}
+                  href={confirmedOrder.customer.paymentLink || config.cardPaymentLink}
                 >
                   Pagar com cartão de crédito ou débito
                 </a>
@@ -541,7 +626,7 @@ function AdminLogin({ loginPass, setLoginPass, loginError, onBack, onSubmit }) {
 
 /* ==================================================================== ADMIN */
 function Admin({ products, orders, config, adminTab, setAdminTab, saveProduct, deleteProduct, adjustStock, updateOrderStatus, saveConfig, editingProduct, setEditingProduct, onExit }) {
-  const blankProduct = { id: '', name: '', category: CAT_KEYS[0], price: '', stock: '', image: '', description: '' };
+  const blankProduct = { id: '', name: '', category: CAT_KEYS[0], price: '', originalPrice: '', stock: '', image: '', description: '' };
 
   const totalRevenue = orders.reduce((s, o) => s + Number(o.total), 0);
   const lowStock = products.filter((p) => p.stock <= 3);
@@ -592,6 +677,9 @@ function Admin({ products, orders, config, adminTab, setAdminTab, saveProduct, d
                   </>
                 )}
                 <p><strong>Pagamento:</strong> {o.customer.payment}</p>
+                {o.customer.payment === 'Cartão' && (o.customer.paymentLink || config.cardPaymentLink) && (
+                  <p><strong>Link de pagamento:</strong> <a href={o.customer.paymentLink || config.cardPaymentLink} target="_blank" rel="noopener noreferrer">{o.customer.paymentLink || config.cardPaymentLink}</a></p>
+                )}
                 <ul>{o.items.map((i) => <li key={i.id}>{i.qty}x {i.name} — {fmt(i.price * i.qty)}</li>)}</ul>
               </div>
             </details>
@@ -663,6 +751,7 @@ function ProductForm({ product, onSave }) {
         </select>
       </label>
       <label>Preço (R$)<input type="number" step="0.01" value={form.price} onChange={(e) => set('price', e.target.value)} /></label>
+      <label>Preço original (opcional — preencha para mostrar desconto)<input type="number" step="0.01" value={form.originalPrice || ''} onChange={(e) => set('originalPrice', e.target.value)} placeholder="Deixe em branco se não houver desconto" /></label>
       <label>Estoque<input type="number" value={form.stock} onChange={(e) => set('stock', e.target.value)} /></label>
       <label>Foto do produto
         <input type="file" accept="image/*" onChange={handleFile} />
@@ -686,6 +775,9 @@ function SettingsForm({ config, onSave }) {
   const [pix, setPix] = useState(config.pixKey);
   const [cardLink, setCardLink] = useState(config.cardPaymentLink);
   const [about, setAbout] = useState(config.sobreTexto);
+  const [promoBarText, setPromoBarText] = useState(config.promoBarText || '');
+  const [heroImage, setHeroImage] = useState(config.heroImage || '');
+  const [uploadingHero, setUploadingHero] = useState(false);
   const [savedMsg, setSavedMsg] = useState('');
 
   const [curPass, setCurPass] = useState('');
@@ -694,8 +786,15 @@ function SettingsForm({ config, onSave }) {
   const [passErr, setPassErr] = useState('');
   const [passMsg, setPassMsg] = useState('');
 
+  const handleHeroFile = async (e) => {
+    const file = e.target.files && e.target.files[0];
+    if (!file) return;
+    setUploadingHero(true);
+    try { setHeroImage(await resizeImage(file, 1200, 0.85)); } catch {} finally { setUploadingHero(false); }
+  };
+
   const saveGeneral = async () => {
-    const ok = await onSave({ ...config, whatsappNumber: onlyDigits(whatsapp), pixKey: pix, cardPaymentLink: cardLink, sobreTexto: about });
+    const ok = await onSave({ ...config, whatsappNumber: onlyDigits(whatsapp), pixKey: pix, cardPaymentLink: cardLink, sobreTexto: about, promoBarText, heroImage });
     if (ok) {
       setSavedMsg('Configurações salvas.');
     } else {
@@ -722,6 +821,17 @@ function SettingsForm({ config, onSave }) {
         <label>Chave Pix<input value={pix} onChange={(e) => setPix(e.target.value)} placeholder="CPF, e-mail, telefone ou chave aleatória" /></label>
         <label>Link de pagamento (cartão de crédito/débito)<input value={cardLink} onChange={(e) => setCardLink(e.target.value)} placeholder="https://... (Mercado Pago, InfinitePay, PagSeguro, etc.)" /></label>
         <label>Texto da seção "Sobre"<textarea value={about} onChange={(e) => setAbout(e.target.value)} rows={4} /></label>
+        <label>Texto da barra promocional (topo do site)<input value={promoBarText} onChange={(e) => setPromoBarText(e.target.value)} placeholder="Ex: Frete grátis acima de R$ 150 — deixe em branco para ocultar" /></label>
+        <label>Imagem do banner principal
+          <input type="file" accept="image/*" onChange={handleHeroFile} />
+        </label>
+        {uploadingHero && <p className="admin-hint">Enviando imagem…</p>}
+        {heroImage && (
+          <div className="upload-preview-wrap">
+            <img src={heroImage} alt="preview do banner" className="upload-preview" />
+            <button type="button" className="text-link" onClick={() => setHeroImage('')}>Remover imagem (volta ao fundo decorativo)</button>
+          </div>
+        )}
         {savedMsg && <p className="save-msg">{savedMsg}</p>}
         <button className="hero-cta" onClick={saveGeneral}>Salvar configurações</button>
       </div>
@@ -754,6 +864,8 @@ function Style() {
 
       .banner-warn { background:#3A2A20; color:#E9C9A6; text-align:center; padding:8px; font-size:13px; }
 
+      .promo-bar { background:var(--gold); color:#1a1510; text-align:center; padding:9px 16px; font-size:12.5px; letter-spacing:0.4px; font-weight:500; }
+
       .header { display:flex; align-items:center; justify-content:space-between; padding:22px 28px; }
       .brand { display:flex; align-items:center; gap:12px; }
       .header-actions { display:flex; align-items:center; gap:16px; }
@@ -778,6 +890,21 @@ function Style() {
       .hero-cta:disabled { opacity:0.4; cursor:not-allowed; }
       .whatsapp-cta { background:#3EA25E; color:#0d1a10; }
 
+      .hero-image-mode { padding:0; min-height:520px; display:flex; align-items:flex-end; }
+      .hero-bg { position:absolute; inset:0; width:100%; height:100%; object-fit:cover; z-index:0; }
+      .hero-scrim { position:absolute; inset:0; background:linear-gradient(180deg, rgba(21,18,15,0.15) 0%, rgba(21,18,15,0.55) 55%, rgba(21,18,15,0.96) 100%); z-index:1; }
+      .hero-image-content { position:relative; z-index:2; width:100%; padding:40px 24px 48px; }
+
+      .carousel-section { padding:10px 0 36px; }
+      .carousel-head { padding:0 28px; margin-bottom:16px; }
+      .carousel-head h2 { font-size:26px; letter-spacing:0.5px; }
+      .carousel-track { display:flex; gap:16px; overflow-x:auto; padding:0 28px 10px; scroll-snap-type:x proximity; -webkit-overflow-scrolling:touch; }
+      .carousel-track::-webkit-scrollbar { height:5px; }
+      .carousel-track::-webkit-scrollbar-thumb { background:#3a332b; border-radius:4px; }
+      .carousel-item { flex:0 0 200px; scroll-snap-align:start; }
+      .carousel-item .card { height:100%; }
+      .ver-mais-btn { display:block; margin:18px auto 0; background:none; border:1px solid var(--gold-soft); color:var(--gold); padding:10px 26px; border-radius:999px; font-size:12px; letter-spacing:1px; text-transform:uppercase; }
+
       .about { max-width:560px; margin:0 auto; text-align:center; padding:0 24px 44px; }
       .about p { font-family:'Cormorant Garamond',serif; font-size:19px; line-height:1.6; color:var(--muted); font-style:italic; }
 
@@ -792,10 +919,14 @@ function Style() {
       .card-visual img { width:100%; height:100%; object-fit:cover; }
       .card-icon { width:56px; height:56px; color:var(--gold-soft); }
       .badge-out { position:absolute; top:10px; right:10px; background:#2a241d; color:var(--danger); font-size:10px; padding:3px 8px; border-radius:10px; letter-spacing:0.5px; }
+      .badge-discount { position:absolute; top:10px; left:10px; background:var(--rose); color:#fbe9e4; font-size:11px; font-weight:600; padding:3px 9px; border-radius:10px; letter-spacing:0.3px; }
       .card-body { padding:16px; }
       .card-cat { font-size:10px; letter-spacing:2px; text-transform:uppercase; color:var(--gold); }
       .card-name { font-size:19px; margin:6px 0 12px; }
-      .card-row { display:flex; align-items:center; justify-content:space-between; }
+      .card-row { display:flex; align-items:center; justify-content:space-between; gap:8px; }
+      .card-price-wrap { display:flex; flex-direction:column; }
+      .card-price-old { font-size:12px; color:var(--muted); text-decoration:line-through; }
+      .card-price-old.big { font-size:16px; }
       .card-price { font-size:15px; color:var(--cream); }
       .card-price.big { font-size:26px; font-family:'Cormorant Garamond',serif; color:var(--gold); }
       .card-add { background:none; border:1px solid var(--gold-soft); color:var(--gold); padding:7px 14px; font-size:11px; letter-spacing:0.5px; border-radius:2px; }
@@ -893,4 +1024,3 @@ function Style() {
     `}</style>
   );
 }
-
